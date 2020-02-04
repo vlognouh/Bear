@@ -100,9 +100,11 @@ static int write_report(int fd, char const *const argv[]);
 static char const **string_array_from_varargs(char const * arg, va_list *args);
 static char const **string_array_copy(char const **in);
 static size_t string_array_length(char const *const *in);
+static size_t string_array_full_length(char const *const *in);
 static void string_array_release(char const **);
 
-
+static char *buff = NULL;
+static int buff_size;
 static bear_env_t env_names =
     { ENV_OUTPUT
     , ENV_PRELOAD
@@ -469,22 +471,56 @@ static void report_call(char const *const argv[]) {
         ERROR_AND_EXIT("unlink");
 }
 
-static int write_binary_string(int fd, const char *const string) {
+static int str_len(char *str)
+{
+    int i = 0;
+    while (str[i] != 0x20)
+        i++;
+
+    str[i] = '\0';
+    return i;
+}
+
+static int write_binary_string(int fd, const char *string) {
     // write type
-    if (-1 == write(fd, "str", 3)) {
-        PERROR("write type");
-        return -1;
+    if ((string[0] == '@') && buff) {
+        int pos = 0;
+        int npos = 0;
+
+        while (pos < buff_size)
+        {
+            npos += str_len(&buff[pos]) + 1;
+            write_binary_string(fd, &buff[pos]);
+            pos=npos;
+        }
+
+        free(buff);
     }
-    // write length
-    const uint32_t length = strlen(string);
-    if (-1 == write(fd, (void *) &length, sizeof(uint32_t))) {
-        PERROR("write length");
-        return -1;
-    }
-    // write value
-    if (-1 == write(fd, (void *) string, length)) {
-        PERROR("write value");
-        return -1;
+    else
+    {
+        uint32_t length = strlen(string);
+        if (!length || !strcmp(string, "-save-temps"))
+        {
+            string = "-null";
+            length = 5;
+        }
+
+        if (-1 == write(fd, "str", 3)) {
+            PERROR("write type");
+            return -1;
+        }
+
+        // write length
+        if (-1 == write(fd, (void *) &length, sizeof(uint32_t))) {
+            PERROR("write length");
+            return -1;
+        }
+
+        // write value
+        if (-1 == write(fd, (void *) string, length)) {
+            PERROR("write value");
+            return -1;
+        }
     }
     return 0;
 }
@@ -496,13 +532,13 @@ static int write_binary_string_list(int fd, const char *const *const strings) {
         return -1;
     }
     // write length
-    const uint32_t length = string_array_length(strings);
+    const uint32_t length = string_array_full_length(strings);
     if (-1 == write(fd, (void *) &length, sizeof(uint32_t))) {
         PERROR("write length");
         return -1;
     }
     // write value
-    for (uint32_t idx = 0; idx < length; ++idx) {
+    for (uint32_t idx = 0; idx < string_array_length(strings); ++idx) {
         const char *string = strings[idx];
         if (-1 == write_binary_string(fd, string)) {
             PERROR("write value");
@@ -564,7 +600,7 @@ static char const **string_array_partial_update(char *const envp[], bear_env_t *
     char const **result = string_array_copy((char const **)envp);
     for (size_t it = 0; it < ENV_SIZE && (*env)[it]; ++it)
         result = string_array_single_update(result, env_names[it], (*env)[it]);
-    return result;
+    return envp;
 }
 
 static char const **string_array_single_update(char const *envs[], char const *key, char const * const value) {
@@ -638,6 +674,35 @@ static char const **string_array_copy(char const **const in) {
             ERROR_AND_EXIT("strdup");
     }
     *out_it = 0;
+    return result;
+}
+
+static size_t string_array_full_length(char const *const *const in) {
+    size_t result = 0;
+    int i;
+    for (char const *const *it = in; (it) && (*it); ++it)
+    {
+        char const *str = *it;
+        int ft = open(&str[1], O_RDONLY);
+        if ((str[0] == '@') && (ft > 0))
+        {
+            buff_size = lseek(ft, 0 , SEEK_END);
+            lseek(ft, 0, SEEK_SET);
+            buff = malloc(buff_size + 1);
+            read(ft, buff, buff_size);
+            close(ft);
+            buff[buff_size] = 0x20;
+            i = 0;
+            while (i <= buff_size)
+            {
+                if (buff[i] == 0x20)
+                    ++result;
+                i++;
+            }
+        } else {
+            ++result;
+        }
+    }
     return result;
 }
 
